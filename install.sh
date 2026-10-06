@@ -369,5 +369,5 @@ Terminal setup is ready.
   Local binaries: $BIN_DIR
 
 Open a new terminal to load aliases and the Charm Starship prompt.
-Run nvim once the plugin sync completes. Use <leader>uT to toggle Charm dark/light.
+Run nvim, then use <leader>uT to toggle Charm dark/light.
 EOF
