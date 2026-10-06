@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestOptionalToolsStartUnchecked(t *testing.T) {
 	options := defaultOptions()
@@ -10,6 +13,20 @@ func TestOptionalToolsStartUnchecked(t *testing.T) {
 	for _, item := range options {
 		if item.selected {
 			t.Errorf("%s should not be selected by default", item.id)
+		}
+	}
+}
+
+func TestAgentDescriptionsExplainAutomaticCharmAppearance(t *testing.T) {
+	want := map[string]string{
+		"codex":    "Charm syntax theme applied automatically",
+		"opencode": "Charm UI theme applied automatically",
+		"claude":   "Charm Dark UI theme applied automatically",
+		"cursor":   "Charm dark hint",
+	}
+	for _, item := range defaultOptions() {
+		if phrase, ok := want[item.id]; ok && !strings.Contains(item.description, phrase) {
+			t.Errorf("%s description %q should explain its Charm appearance: %q", item.id, item.description, phrase)
 		}
 	}
 }

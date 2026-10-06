@@ -74,9 +74,26 @@ PHP and compiler updates are managed by your OS package manager. A scheduled Lin
 
 ### AI CLI theme defaults and compatibility
 
-Selecting Claude Code, Codex, or OpenCode installs and activates its Charm defaults automatically; there is no theme prompt. The shared colors come from `nvim/lua/themes/charm_dark.lua` and the Starship Charm palette. Claude Code and OpenCode support custom UI palettes. Codex currently exposes custom syntax/diff highlighting rather than full TUI chrome colors, so its Charm theme styles that supported surface. Cursor CLI has no custom palette setting in its current configuration schema; the generated shell config uses its supported `COLORFGBG` hint to select dark mode, but Cursor controls its own accent colors. Exact palette matching is therefore limited by each CLI's supported theming surface. Existing agent settings are merged and backed up before they are changed.
+Selecting an AI CLI applies the Charm appearance automatically; the selector has no theme option. Colors are drawn from the same palette as `nvim/lua/themes/charm_dark.lua` and `starship.toml`, within each CLI's supported theming surface:
 
-The selector detects the OS, CPU architecture, Linux libc, package manager, and required system tools. Incompatible items are disabled with a reason; **a** selects only compatible items. The installer currently supports glibc-based Linux and macOS on x86_64/amd64 and ARM64/aarch64. System-package choices also require a supported package manager and `sudo` when the package is missing. musl/Alpine and Linux systems where glibc cannot be confirmed can still use `--config-only`, but cannot run this installer's core binary setup.
+| CLI | Automatic Charm setup | What the CLI allows |
+| --- | --- | --- |
+| Claude Code | Installs `~/.claude/themes/charm-dark.json` and selects `custom:charm-dark` | Custom UI colors |
+| OpenAI Codex | Installs `~/.codex/themes/charm-dark.tmTheme` and selects it in `config.toml` | Syntax highlighting and diffs; the rest of its TUI keeps Codex's own colors |
+| OpenCode | Installs `themes/charm.json` and selects it in `tui.json`/`tui.jsonc` | Custom UI theme |
+| Cursor CLI | Sets `COLORFGBG=15;0` in the generated shell configuration | Dark/light mode only; Cursor controls its accent colors |
+
+Existing agent config values are preserved; changed config files are backed up. Cursor cannot currently be given the exact custom palette through its CLI config, and Codex only exposes syntax/diff themes, so exact color matching is limited by those tools.
+
+The selector detects the OS, CPU architecture, Linux libc, package manager, and required system tools before enabling choices. Unsupported or unavailable items are disabled with the reason shown in the menu; **a** selects only compatible options.
+
+| Device or dependency | Selector behavior |
+| --- | --- |
+| Linux glibc or macOS, amd64 or arm64 | Supported core setup and compatible optional tools are offered |
+| Other OS/architecture, musl/Alpine, or unconfirmed Linux libc | Core install is blocked and optional tools are disabled; `--config-only` can still link configs |
+| Existing PHP/Clang executable (or PHP for Composer) | Offered without requiring a package manager |
+| Missing PHP/compiler on Linux | Offered only with `apt`, `dnf`, or `pacman` and `sudo`; approval is requested interactively |
+| Missing PHP/Clang or GNU GCC on macOS | Homebrew is required; an existing Apple Clang can use the Xcode toolchain |
 
 ## What you get
 

@@ -60,10 +60,10 @@ func defaultOptions() []option {
 		{id: "php", name: "PHP", description: "Latest stable version available for this OS"},
 		{id: "clang", name: "Clang", description: "LLVM compiler from your OS package channel"},
 		{id: "gcc", name: "GCC", description: "GNU compiler from your OS package channel"},
-		{id: "codex", name: "OpenAI Codex", description: "Standalone Codex CLI from OpenAI"},
-		{id: "opencode", name: "OpenCode", description: "OpenCode terminal coding agent"},
-		{id: "claude", name: "Claude Code", description: "Claude Code CLI, stable channel"},
-		{id: "cursor", name: "Cursor CLI", description: "Cursor Agent CLI; command is `agent`"},
+		{id: "codex", name: "OpenAI Codex", description: "Stable CLI; Charm syntax theme applied automatically"},
+		{id: "opencode", name: "OpenCode", description: "OpenCode TUI; Charm UI theme applied automatically"},
+		{id: "claude", name: "Claude Code", description: "Stable CLI; Charm Dark UI theme applied automatically"},
+		{id: "cursor", name: "Cursor CLI", description: "Agent CLI; Charm dark hint (Cursor controls accents)"},
 	}
 }
 
