@@ -9,7 +9,18 @@ permissions:
   contents: write
 
 jobs:
+  windows-installer-tests:
+    runs-on: windows-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Test PowerShell installer config merging
+        shell: pwsh
+        run: ./tests/windows-installer.ps1
+
   release:
+    needs: windows-installer-tests
     runs-on: ubuntu-latest
     steps:
       - name: Check out source
@@ -28,10 +39,11 @@ jobs:
           cd tui
           go test ./...
           mkdir -p ../dist
-          for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
+          for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64 android/arm64; do
             goos="${target%/*}"
             goarch="${target#*/}"
             output="../dist/terminal-tui-${goos}-${goarch}"
+            if [[ "$goos" == windows ]]; then output+='.exe'; fi
             echo "Building ${goos}/${goarch}"
             CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" go build \
               -trimpath -ldflags='-s -w' -o "$output" .

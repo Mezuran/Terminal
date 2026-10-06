@@ -96,15 +96,92 @@ func TestCompatibilityDisablesMissingSystemPackageSupport(t *testing.T) {
 }
 
 func TestCompatibilityDisablesUnsupportedPlatformAndMacGCC(t *testing.T) {
-	for _, item := range optionsForDevice(deviceInfo{os: "windows", arch: "amd64"}) {
-		if item.compatible {
-			t.Errorf("%s should be disabled on Windows", item.id)
+	windows := optionsForDevice(deviceInfo{os: "windows", arch: "amd64"})
+	for _, item := range windows {
+		switch item.id {
+		case "rust", "go", "bun", "nodejs", "uv", "python", "codex", "opencode", "claude", "cursor":
+			if !item.compatible {
+				t.Errorf("%s should be offered on native Windows: %s", item.id, item.reason)
+			}
+		default:
+			if item.compatible {
+				t.Errorf("%s should require a detected Windows prerequisite", item.id)
+			}
+		}
+	}
+	for _, item := range optionsForDevice(deviceInfo{os: "windows", arch: "arm64"}) {
+		if item.id == "cursor" && !item.compatible {
+			t.Fatalf("Cursor should be offered on supported Windows arm64: %s", item.reason)
 		}
 	}
 	for _, item := range optionsForDevice(deviceInfo{os: "darwin", arch: "arm64"}) {
 		if item.id == "gcc" && item.compatible {
 			t.Fatal("GNU GCC should be disabled on macOS without Homebrew")
 		}
+	}
+}
+
+func TestTermuxCompatibilityUsesOnlyVerifiedPackageAndBinaryPaths(t *testing.T) {
+	host := deviceInfo{os: "termux", arch: "arm64", packageManager: "pkg", binaries: map[string]bool{}}
+	if reason := coreIncompatibilityReason(host); reason != "" {
+		t.Fatalf("Termux arm64 should support the pkg-based core: %s", reason)
+	}
+	wantEnabled := map[string]bool{
+		"rust": true, "go": true, "nodejs": true, "python": true, "php": true, "composer": true, "clang": true,
+	}
+	for _, item := range optionsForDevice(host) {
+		if item.compatible != wantEnabled[item.id] {
+			t.Errorf("Termux compatibility for %s = %t (%s), want %t", item.id, item.compatible, item.reason, wantEnabled[item.id])
+		}
+		if item.id == "go" && !strings.Contains(item.description, "temporarily to build Pop") {
+			t.Errorf("Termux Go description should explain its temporary core-build dependency: %q", item.description)
+		}
+	}
+}
+
+func TestTermuxRequiresPkgAndSupportedArchitecture(t *testing.T) {
+	for _, host := range []deviceInfo{
+		{os: "termux", arch: "arm64"},
+		{os: "termux", arch: "amd64", packageManager: "pkg"},
+	} {
+		if reason := coreIncompatibilityReason(host); reason == "" {
+			t.Errorf("expected Termux host %+v to explain unavailable core", host)
+		}
+	}
+}
+
+func TestNativeWindowsArm64ReportsOnlyMissingCoreBinaries(t *testing.T) {
+	host := deviceInfo{os: "windows", arch: "arm64"}
+	if reason := coreIncompatibilityReason(host); reason != "" {
+		t.Fatalf("Windows arm64 should support a partial core install: %s", reason)
+	}
+	warnings := coreWarningsForDevice(host)
+	if strings.Join(warnings, ",") != "lsd (no verified Windows arm64 release),Glow (no verified Windows arm64 release),Pop (no verified Windows arm64 release)" {
+		t.Fatalf("unexpected Windows arm64 core warnings: %v", warnings)
+	}
+}
+
+func TestNativeWindowsComposerRequiresPHP(t *testing.T) {
+	host := deviceInfo{os: "windows", arch: "amd64", binaries: map[string]bool{"composer": true}}
+	for _, item := range optionsForDevice(host) {
+		if item.id == "composer" && item.compatible {
+			t.Fatal("Composer should not be offered without PHP, even if a composer command is present")
+		}
+	}
+	host.binaries["php"] = true
+	for _, item := range optionsForDevice(host) {
+		if item.id == "composer" && !item.compatible {
+			t.Fatalf("Composer should be offered when PHP is available: %s", item.reason)
+		}
+	}
+}
+
+func TestTermuxDetectionDoesNotTreatWSLAsAndroid(t *testing.T) {
+	if !isTermuxEnvironment("android", "", "") || !isTermuxEnvironment("linux", "/data/data/com.termux/files/usr", "") || !isTermuxEnvironment("linux", "", "0.118") {
+		t.Fatal("expected Android and Termux environment markers to be recognized")
+	}
+	if isTermuxEnvironment("linux", "/usr", "") || isTermuxEnvironment("windows", "", "") {
+		t.Fatal("ordinary Linux/WSL and Windows must not be misdetected as Termux")
 	}
 }
 

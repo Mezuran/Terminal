@@ -19,6 +19,7 @@ SELECTED_TOOLS=""
 PROGRESS_CURRENT=0
 PROGRESS_TOTAL=0
 TUI_BIN=""
+SCHEDULER_CONFIGURED=0
 
 say() { printf '\n\033[1;35m›\033[0m %s\n' "$*"; }
 warn() { printf '\n\033[1;33m!\033[0m %s\n' "$*" >&2; }
@@ -77,9 +78,27 @@ contains_tool() {
   esac
 }
 
+is_termux() {
+  [[ "${TERMUX_VERSION:-}" != "" || "${PREFIX:-}" == *"/com.termux/"* ]]
+}
+
+sha256_file() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{print $1}'
+  else
+    return 127
+  fi
+}
+
 ensure_tui() {
   local goos goarch asset checksums
-  goos="$(uname -s | tr '[:upper:]' '[:lower:]')"
+  if is_termux; then
+    goos=android
+  else
+    goos="$(uname -s | tr '[:upper:]' '[:lower:]')"
+  fi
   goarch="$(uname -m)"
   case "$goarch" in
     x86_64|amd64) goarch=amd64 ;;
@@ -88,6 +107,7 @@ ensure_tui() {
   esac
   case "$goos" in
     linux|darwin) ;;
+    android) [[ "$goarch" == arm64 ]] || return 1 ;;
     *) return 1 ;;
   esac
 
@@ -100,28 +120,9 @@ ensure_tui() {
     curl --fail --silent --show-error --location --retry 2 \
     "https://github.com/Mezuran/Terminal/releases/latest/download/$asset" \
     --output "$TUI_BIN" 2>/dev/null; then
-    if python3 - "$checksums" "$TUI_BIN" "$asset" <<'PY'
-import hashlib
-import sys
-
-checksum_file, target, name = sys.argv[1:]
-expected = None
-with open(checksum_file, encoding="utf-8") as checksums:
-    for line in checksums:
-        digest, filename = line.strip().split(maxsplit=1)
-        if filename.lstrip("* ") == name:
-            expected = digest
-            break
-if expected is None:
-    raise SystemExit("missing checksum for installer UI")
-digest = hashlib.sha256()
-with open(target, "rb") as binary:
-    for block in iter(lambda: binary.read(1024 * 1024), b""):
-        digest.update(block)
-if digest.hexdigest() != expected:
-    raise SystemExit("installer UI checksum mismatch")
-PY
-    then
+    expected="$(awk -v name="$asset" '$2 == name { print $1; exit }' "$checksums")"
+    actual="$(sha256_file "$TUI_BIN" 2>/dev/null || true)"
+    if [[ -n "$expected" && "$actual" == "$expected" ]]; then
       chmod 0755 "$TUI_BIN"
       return 0
     fi
@@ -137,6 +138,10 @@ PY
 }
 
 select_optional_tools() {
+  if is_termux; then
+    command -v pkg >/dev/null 2>&1 || die "Termux was detected but its pkg package manager is missing."
+    pkg install -y curl coreutils gawk || die "Could not install the Termux tools needed to verify and launch the selector."
+  fi
   if ((NO_UI)); then
     warn "Interactive selector disabled; installing the core terminal setup only."
     SELECTED_TOOLS=""
@@ -648,6 +653,10 @@ if os.path.exists(source):
     config = json.loads("".join(without_trailing_commas))
     if not isinstance(config, dict):
         raise SystemExit(f"{source} must contain a JSON object")
+try:
+    value = json.loads(value)
+except json.JSONDecodeError:
+    pass
 config[key] = value
 with open(destination, "w", encoding="utf-8") as stream:
     json.dump(config, stream, indent=2, ensure_ascii=False)
@@ -738,14 +747,28 @@ install_codex_theme() {
 }
 
 install_opencode_theme() {
-  local config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/opencode" config_file
-  install_theme_asset "$REPO_DIR/ai-themes/opencode/charm.json" "$config_dir/themes/charm.json"
-  if [[ -f "$config_dir/tui.jsonc" ]]; then
-    merge_json_setting "$config_dir/tui.jsonc" theme charm
+  local config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/opencode" config_file version use_cli_settings=0
+  if [[ -f "$config_dir/cli.json" ]]; then
+    use_cli_settings=1
+  elif command -v opencode >/dev/null 2>&1; then
+    version="$(opencode --version 2>/dev/null || true)"
+    if [[ "$version" =~ ([0-9]+)\. ]] && ((BASH_REMATCH[1] >= 2)); then
+      use_cli_settings=1
+    fi
   fi
-  if [[ -f "$config_dir/tui.json" || ! -f "$config_dir/tui.jsonc" ]]; then
-    config_file="$config_dir/tui.json"
-    merge_json_setting "$config_file" theme charm
+  if ((use_cli_settings)); then
+    install_theme_asset "$REPO_DIR/ai-themes/opencode/charm-v2.json" "$config_dir/themes/charm-v2.json"
+    merge_json_setting "$config_dir/cli.json" theme '{"name":"charm-v2","mode":"dark"}'
+  else
+    install_theme_asset "$REPO_DIR/ai-themes/opencode/charm.json" "$config_dir/themes/charm.json"
+    if [[ -f "$config_dir/tui.jsonc" ]]; then
+      merge_json_setting "$config_dir/tui.jsonc" theme charm
+    elif [[ -f "$config_dir/tui.json" ]]; then
+      merge_json_setting "$config_dir/tui.json" theme charm
+    else
+      config_file="$config_dir/tui.json"
+      merge_json_setting "$config_file" theme charm
+    fi
   fi
   say "Enabled the Charm theme for OpenCode."
 }
@@ -840,6 +863,12 @@ install_system_packages() {
 }
 
 install_selected_tool() {
+  if is_termux; then
+    case "$1" in
+      rust|go|nodejs|python|composer|php|clang) return 0 ;;
+      *) die "$1 is not supported by the Termux installer." ;;
+    esac
+  fi
   case "$1" in
     rust)
       if command -v rustup >/dev/null 2>&1; then
@@ -897,13 +926,43 @@ install_selected_tool() {
 
 install_selected_tools() {
   local tool
-  install_system_packages
+  if is_termux; then
+    install_termux_selected_packages
+  else
+    install_system_packages
+  fi
   IFS=',' read -r -a selected_array <<< "$SELECTED_TOOLS"
   for tool in "${selected_array[@]}"; do
     [[ -n "$tool" ]] || continue
     install_selected_tool "$tool" || die "Could not install $tool."
     progress_step "Installed $tool"
   done
+}
+
+termux_package_for_tool() {
+  case "$1" in
+    rust) printf '%s\n' rust ;;
+    go) printf '%s\n' golang ;;
+    nodejs) printf '%s\n' nodejs-lts ;;
+    python) printf '%s\n' python ;;
+    composer) printf '%s\n' composer ;;
+    php) printf '%s\n' php ;;
+    clang) printf '%s\n' clang ;;
+    *) return 1 ;;
+  esac
+}
+
+install_termux_selected_packages() {
+  local tool package
+  local packages=()
+  IFS=',' read -r -a selected_array <<< "$SELECTED_TOOLS"
+  for tool in "${selected_array[@]}"; do
+    [[ -n "$tool" ]] || continue
+    package="$(termux_package_for_tool "$tool")" || die "$tool is not supported by the Termux installer."
+    packages+=("$package")
+  done
+  ((${#packages[@]})) || return 0
+  pkg install -y "${packages[@]}" || die "Could not install selected Termux packages."
 }
 
 update_system_packages() {
@@ -952,6 +1011,21 @@ update_selected_tools() {
   SELECTED_TOOLS="$(paste -sd, "$CONFIG_DIR/terminal/selected-tools")"
   [[ -n "$SELECTED_TOOLS" ]] || { say "No optional tools were selected; nothing to update."; return 0; }
 
+  if is_termux; then
+    local package
+    local packages=()
+    IFS=',' read -r -a selected_array <<< "$SELECTED_TOOLS"
+    for tool in "${selected_array[@]}"; do
+      package="$(termux_package_for_tool "$tool")" || { warn "Ignoring unsupported Termux tool '$tool'."; continue; }
+      packages+=("$package")
+    done
+    if ((${#packages[@]})); then
+      pkg install -y "${packages[@]}" || return 1
+      say "Selected Termux packages are up to date."
+    fi
+    return 0
+  fi
+
   update_system_packages
   IFS=',' read -r -a selected_array <<< "$SELECTED_TOOLS"
   for tool in "${selected_array[@]}"; do
@@ -984,6 +1058,10 @@ update_selected_tools() {
 
 install_weekly_scheduler() {
   local unit_dir plist_dir
+  if is_termux; then
+    warn "Android does not provide a dependable user scheduler here; run '$REPO_DIR/update.sh' weekly to update selected tools."
+    return 0
+  fi
   if [[ "$(uname -s)" == Darwin ]]; then
     plist_dir="$HOME/Library/LaunchAgents"
     mkdir -p "$plist_dir"
@@ -1004,7 +1082,11 @@ Path(output).write_bytes(plistlib.dumps({
 }))
 PY
     launchctl bootout "gui/$(id -u)/com.mezuran.terminal-update" >/dev/null 2>&1 || true
-    launchctl bootstrap "gui/$(id -u)" "$plist_dir/com.mezuran.terminal-update.plist" || warn "Could not load the weekly launchd updater."
+    if launchctl bootstrap "gui/$(id -u)" "$plist_dir/com.mezuran.terminal-update.plist"; then
+      SCHEDULER_CONFIGURED=1
+    else
+      warn "Could not load the weekly launchd updater."
+    fi
     return 0
   fi
 
@@ -1033,7 +1115,11 @@ Persistent=true
 [Install]
 WantedBy=timers.target
 EOF
-    systemctl --user daemon-reload && systemctl --user enable --now terminal-update.timer || warn "Could not enable the systemd user timer."
+    if systemctl --user daemon-reload && systemctl --user enable --now terminal-update.timer; then
+      SCHEDULER_CONFIGURED=1
+    else
+      warn "Could not enable the systemd user timer."
+    fi
   else
     warn "No usable systemd user manager was found; run '$REPO_DIR/update.sh' weekly to update selected tools."
   fi
@@ -1054,6 +1140,38 @@ linux_uses_glibc() {
 
 install_tools() {
   local os arch nvim_asset starship_pattern lsd_pattern bat_pattern glow_pattern pop_pattern
+  if is_termux; then
+    local installed_golang_for_pop=0
+    command -v pkg >/dev/null 2>&1 || die "Termux pkg was not found."
+    case "$(uname -m)" in
+      aarch64|arm64) ;;
+      *) die "Termux core setup is supported only on Android arm64 (detected $(uname -m))." ;;
+    esac
+    say "Installing the Termux-compatible core from the official pkg repositories…"
+    pkg update -y || die "Could not refresh Termux package indexes."
+    pkg install -y neovim starship lsd bat glow git curl tar coreutils findutils \
+      || die "Could not install the Termux-compatible core packages."
+    progress_step "Neovim ready"
+    progress_step "Starship ready"
+    progress_step "lsd ready"
+    progress_step "bat ready"
+    progress_step "Glow ready"
+    if ! command -v pop >/dev/null 2>&1; then
+      if ! command -v go >/dev/null 2>&1; then
+        pkg install -y golang || die "Could not install the temporary Go build dependency for Pop."
+        installed_golang_for_pop=1
+      fi
+      mkdir -p "$BIN_DIR" "$OPT_DIR/go"
+      CGO_ENABLED=0 GOBIN="$BIN_DIR" GOPATH="$OPT_DIR/go" go install github.com/charmbracelet/pop@latest \
+        || die "Could not build Pop for Android/Termux using the Termux Go package."
+    fi
+    progress_step "Pop ready"
+    if ((installed_golang_for_pop)) && ! contains_tool go; then
+      pkg uninstall -y golang || warn "Pop was built, but the temporary Go build dependency could not be removed."
+    fi
+    install_blesh_if_available
+    return 0
+  fi
   os="$(uname -s)"
   arch="$(uname -m)"
 
@@ -1158,7 +1276,11 @@ if ((INSTALL_TOOLS)); then progress_step "Shell startup configured"; fi
 
 if ((INSTALL_TOOLS)); then
   install_weekly_scheduler
-  progress_step "Weekly updater configured"
+  if ((SCHEDULER_CONFIGURED)); then
+    progress_step "Weekly updater configured"
+  else
+    progress_step "Manual updater available"
+  fi
   say "Bootstrapping NvChad and its locked plugins (first run may take a little while)…"
   if ! nvim --headless +qa >"$TMP_DIR/nvim-bootstrap.log" 2>&1; then
     cat "$TMP_DIR/nvim-bootstrap.log" >&2
@@ -1180,5 +1302,9 @@ Run nvim, then use <leader>uT to toggle Charm dark/light.
 EOF
 
 if ((INSTALL_TOOLS)); then
-  say "Selected optional tools update on a weekly schedule. Review the choices in $CONFIG_DIR/terminal/selected-tools."
+  if ((SCHEDULER_CONFIGURED)); then
+    say "Selected optional tools update weekly. Review the choices in $CONFIG_DIR/terminal/selected-tools."
+  else
+    say "Selected tools are recorded in $CONFIG_DIR/terminal/selected-tools. Run '$REPO_DIR/update.sh' manually to check for updates."
+  fi
 fi

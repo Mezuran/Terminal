@@ -12,7 +12,6 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
-	"syscall"
 
 	"github.com/charmbracelet/bubbles/progress"
 	"github.com/charmbracelet/bubbles/spinner"
@@ -72,6 +71,7 @@ type deviceInfo struct {
 	arch           string
 	libc           string
 	coreReason     string
+	coreWarnings   []string
 	packageManager string
 	hasBrew        bool
 	hasSudo        bool
@@ -86,13 +86,20 @@ func detectDevice() deviceInfo {
 		hasSudo:  commandExists("sudo"),
 		binaries: make(map[string]bool),
 	}
+	if isTermuxEnvironment(runtime.GOOS, os.Getenv("PREFIX"), os.Getenv("TERMUX_VERSION")) {
+		device.os = "termux"
+	}
 	if device.os == "linux" {
 		device.libc = detectLinuxLibc()
 	}
-	for _, name := range []string{"php", "clang", "gcc"} {
+	for _, name := range []string{"php", "clang", "gcc", "composer", "lsd", "glow", "pop"} {
 		device.binaries[name] = commandExists(name)
 	}
-	if device.os == "linux" {
+	if device.os == "termux" {
+		if commandExists("pkg") {
+			device.packageManager = "pkg"
+		}
+	} else if device.os == "linux" {
 		for _, manager := range []string{"apt-get", "dnf", "pacman"} {
 			if commandExists(manager) {
 				device.packageManager = manager
@@ -100,7 +107,13 @@ func detectDevice() deviceInfo {
 			}
 		}
 	}
+	device.coreReason = coreIncompatibilityReason(device)
+	device.coreWarnings = coreWarningsForDevice(device)
 	return device
+}
+
+func isTermuxEnvironment(runtimeOS, prefix, version string) bool {
+	return runtimeOS == "android" || version != "" || strings.Contains(prefix, "/com.termux/")
 }
 
 func detectLinuxLibc() string {
@@ -139,6 +152,13 @@ func commandExists(name string) bool {
 
 func optionsForDevice(device deviceInfo) []option {
 	options := defaultOptions()
+	if device.os == "termux" {
+		for i := range options {
+			if options[i].id == "go" {
+				options[i].description = "Termux package; also required temporarily to build Pop"
+			}
+		}
+	}
 	if device.coreReason == "" {
 		device.coreReason = coreIncompatibilityReason(device)
 	}
@@ -150,8 +170,26 @@ func optionsForDevice(device deviceInfo) []option {
 }
 
 func coreIncompatibilityReason(device deviceInfo) string {
-	if (device.os != "linux" && device.os != "darwin") ||
-		(device.arch != "amd64" && device.arch != "arm64") {
+	supportedArch := device.arch == "amd64" || device.arch == "arm64"
+	switch device.os {
+	case "termux":
+		if device.arch != "arm64" {
+			return fmt.Sprintf("Termux core packages are supported only on Android arm64 (detected %s)", device.arch)
+		}
+		if device.packageManager != "pkg" {
+			return "Termux package manager 'pkg' was not detected"
+		}
+		return ""
+	case "windows":
+		if supportedArch {
+			return ""
+		}
+		return fmt.Sprintf("core setup does not support windows/%s", device.arch)
+	case "linux", "darwin":
+		if !supportedArch {
+			return fmt.Sprintf("core setup does not support %s/%s", device.os, device.arch)
+		}
+	default:
 		return fmt.Sprintf("core setup does not support %s/%s", device.os, device.arch)
 	}
 	if device.os == "linux" && device.libc != "glibc" {
@@ -163,9 +201,28 @@ func coreIncompatibilityReason(device deviceInfo) string {
 	return ""
 }
 
+func coreWarningsForDevice(device deviceInfo) []string {
+	if device.os == "windows" && device.arch == "arm64" {
+		var warnings []string
+		for _, tool := range []struct{ id, name string }{{"lsd", "lsd"}, {"glow", "Glow"}, {"pop", "Pop"}} {
+			if !device.binaries[tool.id] {
+				warnings = append(warnings, tool.name+" (no verified Windows arm64 release)")
+			}
+		}
+		return warnings
+	}
+	return nil
+}
+
 func incompatibilityReason(id string, device deviceInfo) string {
 	if device.coreReason != "" {
 		return device.coreReason
+	}
+	if device.os == "termux" {
+		return termuxIncompatibilityReason(id, device)
+	}
+	if device.os == "windows" {
+		return windowsIncompatibilityReason(id, device)
 	}
 	if (device.os != "linux" && device.os != "darwin") ||
 		(device.arch != "amd64" && device.arch != "arm64") {
@@ -200,12 +257,68 @@ func incompatibilityReason(id string, device deviceInfo) string {
 	return ""
 }
 
+func termuxIncompatibilityReason(id string, device deviceInfo) string {
+	switch id {
+	case "rust", "go", "nodejs", "python", "php", "clang":
+		return ""
+	case "composer":
+		if !device.binaries["php"] && device.packageManager != "pkg" {
+			return "requires PHP from the Termux pkg repository"
+		}
+		return ""
+	case "gcc":
+		return "Termux provides Clang, not GNU GCC"
+	case "bun":
+		return "Bun does not publish a supported Android/Termux build"
+	case "uv":
+		return "uv does not publish a supported Android/Termux build"
+	case "codex", "opencode", "claude", "cursor":
+		return "this CLI does not publish a supported Android/Termux build"
+	default:
+		return "not supported in Termux"
+	}
+}
+
+func windowsIncompatibilityReason(id string, device deviceInfo) string {
+	switch id {
+	case "rust", "go", "bun", "nodejs", "uv", "python", "codex", "opencode", "claude":
+		return ""
+	case "cursor":
+		if device.arch == "amd64" || device.arch == "arm64" {
+			return ""
+		}
+		return fmt.Sprintf("Cursor CLI does not support Windows %s", device.arch)
+	case "php":
+		if device.binaries["php"] {
+			return ""
+		}
+		return "requires an existing PHP installation; automatic Windows PHP installation is not configured"
+	case "composer":
+		if device.binaries["php"] {
+			return ""
+		}
+		return "requires PHP; install PHP first or add php.exe to PATH"
+	case "clang":
+		if device.binaries["clang"] {
+			return ""
+		}
+		return "requires an existing LLVM/Clang installation on Windows"
+	case "gcc":
+		if device.binaries["gcc"] {
+			return ""
+		}
+		return "requires an existing GCC/MinGW installation on Windows"
+	default:
+		return "not supported on Windows"
+	}
+}
+
 func packageUnavailableReason(device deviceInfo) string {
 	if device.os == "darwin" {
 		return "requires Homebrew or an existing system compiler"
 	}
 	if device.packageManager == "" {
-		return "requires apt, dnf, or pacman"
+		return "requires a supported system package manager"
 	}
 	if !device.hasSudo {
 		return "requires sudo to install the system package"
@@ -382,12 +495,15 @@ func (m model) View() string {
 	if m.stage == "select" {
 		b.WriteString(lipgloss.NewStyle().Bold(true).Foreground(cream).Render("Choose your toolkit"))
 		b.WriteString("\n")
-		b.WriteString(mutedStyle.Render(fmt.Sprintf("Device: %s/%s · incompatible tools are disabled.", runtime.GOOS, runtime.GOARCH)))
+		b.WriteString(mutedStyle.Render(fmt.Sprintf("Device: %s/%s · incompatible tools are disabled.", m.device.os, m.device.arch)))
 		b.WriteString("\n")
 		if m.device.coreReason != "" {
 			b.WriteString(statusBad.Render("Core setup unavailable: ") + mutedStyle.Render(m.device.coreReason))
 		} else {
 			b.WriteString(mutedStyle.Render("Core setup is included; optional tools start unchecked."))
+			if len(m.device.coreWarnings) > 0 {
+				b.WriteString("\n" + statusBad.Render("Core items unavailable: ") + mutedStyle.Render(strings.Join(m.device.coreWarnings, ", ")))
+			}
 		}
 		b.WriteString("\n\n")
 		for i, item := range m.options {
@@ -453,7 +569,7 @@ func (m model) selectedIDs() []string {
 }
 
 func (m model) needsSudo() bool {
-	if runtime.GOOS != "linux" || os.Getenv("TERMINAL_SKIP_SUDO_PREFLIGHT") == "1" {
+	if m.device.os != "linux" || os.Getenv("TERMINAL_SKIP_SUDO_PREFLIGHT") == "1" {
 		return false
 	}
 	_, aptErr := exec.LookPath("apt-get")
@@ -480,8 +596,17 @@ func (m model) needsSudo() bool {
 func (m model) runInstaller() tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithCancel(context.Background())
-		cmd := exec.CommandContext(ctx, "bash", os.Args[1], "--run-selected", strings.Join(m.selected, ","))
-		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		var cmd *exec.Cmd
+		if m.device.os == "windows" {
+			powershell := "powershell.exe"
+			if commandExists("pwsh") {
+				powershell = "pwsh"
+			}
+			cmd = exec.CommandContext(ctx, powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", os.Args[1], "-RunSelection", "-RunSelected", strings.Join(m.selected, ","))
+		} else {
+			cmd = exec.CommandContext(ctx, "bash", os.Args[1], "--run-selected", strings.Join(m.selected, ","))
+		}
+		configureChildCommand(cmd)
 		reader, writer, err := os.Pipe()
 		if err != nil {
 			cancel()
@@ -497,9 +622,7 @@ func (m model) runInstaller() tea.Cmd {
 		}
 		_ = writer.Close()
 		stop := func() {
-			if cmd.Process != nil {
-				_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
-			}
+			stopChildCommand(cmd)
 			cancel()
 		}
 		go func() {
@@ -547,19 +670,21 @@ func trimLine(line string, limit int) string {
 
 func main() {
 	if len(os.Args) < 2 || strings.TrimSpace(os.Args[1]) == "" {
-		fmt.Fprintln(os.Stderr, "usage: terminal-tui /path/to/install.sh")
+		fmt.Fprintln(os.Stderr, "usage: terminal-tui /path/to/install.sh-or-install.ps1")
 		os.Exit(2)
 	}
 	if _, err := os.Stat(os.Args[1]); err != nil {
 		fmt.Fprintln(os.Stderr, "installer script not found:", err)
 		os.Exit(2)
 	}
-	tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "interactive terminal required; use install.sh --no-ui for non-interactive setup")
-		os.Exit(2)
+	if runtime.GOOS != "windows" {
+		tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "interactive terminal required; use the installer with --no-ui for non-interactive setup")
+			os.Exit(2)
+		}
+		_ = tty.Close()
 	}
-	_ = tty.Close()
 	if err := initialModel().execute(); err != nil {
 		if err != io.EOF {
 			fmt.Fprintln(os.Stderr, "terminal setup failed:", err)
