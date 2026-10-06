@@ -22,7 +22,7 @@ On Linux or macOS, with `git`, `curl`, `tar`, and Python 3 available, run:
 git clone --depth 1 https://github.com/Mezuran/Terminal.git "$HOME/.local/share/terminal" && "$HOME/.local/share/terminal/install.sh"
 ```
 
-The installer works in your home directory and does **not** use `sudo`. It downloads missing tools from their upstream releases, sets up the configurations, then installs/syncs the Neovim plugins. Open a new terminal when it finishes.
+The installer works in your home directory and does **not** use `sudo`. It downloads missing tools from their upstream releases, sets up the configurations, then installs the Neovim plugins pinned by the lockfile. Open a new terminal when it finishes.
 
 > **Backups, not surprises:** Existing `~/.config/nvim` and `~/.config/starship.toml` are moved to timestamped `.backup-*` paths before the managed symlinks are created. Existing shell startup files are preserved and backed up before a small, marked setup block is appended. Re-running the installer is safe.
 
@@ -32,9 +32,9 @@ To update the setup later:
 git -C "$HOME/.local/share/terminal" pull --ff-only && "$HOME/.local/share/terminal/install.sh"
 ```
 
-This updates the managed configs and Neovim plugins. Installed tool binaries are left in place; the installer downloads a binary only when the command is missing.
+This refreshes the managed configs and bootstraps any missing Neovim plugins from the lockfile. Installed tool binaries and existing plugin revisions are left in place; the installer downloads a binary only when the command is missing. Use `:Lazy update` from Neovim when you intentionally want newer plugin versions.
 
-To only link the configs and aliases (without downloading tools or syncing plugins):
+To only link the configs and aliases (without downloading tools or installing plugins):
 
 ```bash
 "$HOME/.local/share/terminal/install.sh" --config-only

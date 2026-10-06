@@ -353,12 +353,12 @@ case "${SHELL:-}" in
 esac
 
 if ((INSTALL_TOOLS)); then
-  say "Installing and syncing NvChad plugins (first run may take a little while)…"
-  if ! nvim --headless '+Lazy! sync' +qa >"$TMP_DIR/nvim-sync.log" 2>&1; then
-    cat "$TMP_DIR/nvim-sync.log" >&2
-    die "Neovim plugin sync failed. Re-run install.sh after resolving the error."
+  say "Bootstrapping NvChad and its locked plugins (first run may take a little while)…"
+  if ! nvim --headless +qa >"$TMP_DIR/nvim-bootstrap.log" 2>&1; then
+    cat "$TMP_DIR/nvim-bootstrap.log" >&2
+    die "Neovim setup failed. Re-run install.sh after resolving the error."
   fi
-  say "Neovim plugins are installed."
+  say "Neovim setup completed."
 fi
 
 cat <<EOF
