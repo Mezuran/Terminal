@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"runtime"
 	"strconv"
@@ -43,6 +44,8 @@ type option struct {
 	name        string
 	description string
 	selected    bool
+	compatible  bool
+	reason      string
 }
 
 func defaultOptions() []option {
@@ -64,8 +67,155 @@ func defaultOptions() []option {
 	}
 }
 
+type deviceInfo struct {
+	os             string
+	arch           string
+	libc           string
+	coreReason     string
+	packageManager string
+	hasBrew        bool
+	hasSudo        bool
+	binaries       map[string]bool
+}
+
+func detectDevice() deviceInfo {
+	device := deviceInfo{
+		os:       runtime.GOOS,
+		arch:     runtime.GOARCH,
+		hasBrew:  commandExists("brew"),
+		hasSudo:  commandExists("sudo"),
+		binaries: make(map[string]bool),
+	}
+	if device.os == "linux" {
+		device.libc = detectLinuxLibc()
+	}
+	for _, name := range []string{"php", "clang", "gcc"} {
+		device.binaries[name] = commandExists(name)
+	}
+	if device.os == "linux" {
+		for _, manager := range []string{"apt-get", "dnf", "pacman"} {
+			if commandExists(manager) {
+				device.packageManager = manager
+				break
+			}
+		}
+	}
+	return device
+}
+
+func detectLinuxLibc() string {
+	for _, pattern := range []string{
+		"/lib/ld-musl-*.so.1",
+		"/lib64/ld-musl-*.so.1",
+		"/usr/lib/ld-musl-*.so.1",
+	} {
+		if matches, _ := filepath.Glob(pattern); len(matches) > 0 {
+			return "musl"
+		}
+	}
+	if _, err := os.Stat("/etc/alpine-release"); err == nil {
+		return "musl"
+	}
+	if output, err := exec.Command("getconf", "GNU_LIBC_VERSION").Output(); err == nil &&
+		strings.HasPrefix(strings.TrimSpace(string(output)), "glibc ") {
+		return "glibc"
+	}
+	for _, pattern := range []string{
+		"/lib/ld-linux*.so*",
+		"/lib64/ld-linux*.so*",
+		"/usr/lib/ld-linux*.so*",
+	} {
+		if matches, _ := filepath.Glob(pattern); len(matches) > 0 {
+			return "glibc"
+		}
+	}
+	return "unknown"
+}
+
+func commandExists(name string) bool {
+	_, err := exec.LookPath(name)
+	return err == nil
+}
+
+func optionsForDevice(device deviceInfo) []option {
+	options := defaultOptions()
+	if device.coreReason == "" {
+		device.coreReason = coreIncompatibilityReason(device)
+	}
+	for i := range options {
+		options[i].reason = incompatibilityReason(options[i].id, device)
+		options[i].compatible = options[i].reason == ""
+	}
+	return options
+}
+
+func coreIncompatibilityReason(device deviceInfo) string {
+	if (device.os != "linux" && device.os != "darwin") ||
+		(device.arch != "amd64" && device.arch != "arm64") {
+		return fmt.Sprintf("core setup does not support %s/%s", device.os, device.arch)
+	}
+	if device.os == "linux" && device.libc != "glibc" {
+		if device.libc == "musl" {
+			return "core binary releases require glibc; musl/Alpine is not supported"
+		}
+		return "could not confirm glibc support for this Linux device"
+	}
+	return ""
+}
+
+func incompatibilityReason(id string, device deviceInfo) string {
+	if device.coreReason != "" {
+		return device.coreReason
+	}
+	if (device.os != "linux" && device.os != "darwin") ||
+		(device.arch != "amd64" && device.arch != "arm64") {
+		return fmt.Sprintf("not supported on %s/%s", device.os, device.arch)
+	}
+
+	canInstallPackage := device.hasBrew && device.os == "darwin"
+	if device.os == "linux" && device.packageManager != "" && device.hasSudo {
+		canInstallPackage = true
+	}
+	switch id {
+	case "php":
+		if !device.binaries["php"] && !canInstallPackage {
+			return packageUnavailableReason(device)
+		}
+	case "composer":
+		if !device.binaries["php"] && !canInstallPackage {
+			return "requires PHP; no supported package installer is available"
+		}
+	case "clang":
+		if !device.binaries["clang"] && !canInstallPackage {
+			return packageUnavailableReason(device)
+		}
+	case "gcc":
+		if device.os == "darwin" && !device.hasBrew {
+			return "GNU GCC on macOS requires Homebrew"
+		}
+		if device.os == "linux" && !device.binaries["gcc"] && !canInstallPackage {
+			return packageUnavailableReason(device)
+		}
+	}
+	return ""
+}
+
+func packageUnavailableReason(device deviceInfo) string {
+	if device.os == "darwin" {
+		return "requires Homebrew or an existing system compiler"
+	}
+	if device.packageManager == "" {
+		return "requires apt, dnf, or pacman"
+	}
+	if !device.hasSudo {
+		return "requires sudo to install the system package"
+	}
+	return "no supported system package installer is available"
+}
+
 type model struct {
 	options       []option
+	device        deviceInfo
 	cursor        int
 	width         int
 	stage         string
@@ -93,8 +243,11 @@ func initialModel() model {
 	s.Spinner = spinner.Dot
 	s.Style = lipgloss.NewStyle().Foreground(violet)
 	p := progress.New(progress.WithGradient("#00ffb2", "#9671ff"))
+	device := detectDevice()
+	device.coreReason = coreIncompatibilityReason(device)
 	return model{
-		options:  defaultOptions(),
+		options:  optionsForDevice(device),
+		device:   device,
 		stage:    "select",
 		status:   "Choose optional tools. Core terminal setup is always included.",
 		progress: p,
@@ -178,16 +331,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.cursor++
 				}
 			case " ":
-				m.options[m.cursor].selected = !m.options[m.cursor].selected
+				if m.options[m.cursor].compatible {
+					m.options[m.cursor].selected = !m.options[m.cursor].selected
+				}
 			case "a":
 				for i := range m.options {
-					m.options[i].selected = true
+					m.options[i].selected = m.options[i].compatible
 				}
 			case "n":
 				for i := range m.options {
 					m.options[i].selected = false
 				}
 			case "enter":
+				if m.device.coreReason != "" {
+					m.status = "This device cannot run the core Terminal install; press q to exit."
+					return m, nil
+				}
 				m.selected = m.selectedIDs()
 				if m.needsSudo() {
 					m.checkingSudo = true
@@ -223,7 +382,13 @@ func (m model) View() string {
 	if m.stage == "select" {
 		b.WriteString(lipgloss.NewStyle().Bold(true).Foreground(cream).Render("Choose your toolkit"))
 		b.WriteString("\n")
-		b.WriteString(mutedStyle.Render("Core setup is included; optional tools start unchecked."))
+		b.WriteString(mutedStyle.Render(fmt.Sprintf("Device: %s/%s · incompatible tools are disabled.", runtime.GOOS, runtime.GOARCH)))
+		b.WriteString("\n")
+		if m.device.coreReason != "" {
+			b.WriteString(statusBad.Render("Core setup unavailable: ") + mutedStyle.Render(m.device.coreReason))
+		} else {
+			b.WriteString(mutedStyle.Render("Core setup is included; optional tools start unchecked."))
+		}
 		b.WriteString("\n\n")
 		for i, item := range m.options {
 			pointer := "  "
@@ -231,15 +396,24 @@ func (m model) View() string {
 				pointer = lipgloss.NewStyle().Foreground(violet).Bold(true).Render("› ")
 			}
 			box := unchecked.Render("○")
-			if item.selected {
+			name := nameStyle.Render(item.name)
+			description := item.description
+			if !item.compatible {
+				box = lipgloss.NewStyle().Foreground(muted).Render("–")
+				name = mutedStyle.Render(item.name)
+				description = "Unavailable: " + item.reason
+			} else if item.selected {
 				box = checked.Render("●")
 			}
-			name := nameStyle.Render(item.name)
-			desc := mutedStyle.Render(item.description)
+			desc := mutedStyle.Render(description)
 			b.WriteString(fmt.Sprintf("%s%s  %-18s %s\n", pointer, box, name, desc))
 		}
 		b.WriteString("\n")
-		b.WriteString(mutedStyle.Render("↑/↓ move  ") + keyStyle.Render("space") + mutedStyle.Render(" toggle  ") + keyStyle.Render("a") + mutedStyle.Render(" all  ") + keyStyle.Render("n") + mutedStyle.Render(" none  ") + keyStyle.Render("enter") + mutedStyle.Render(" install  ") + keyStyle.Render("q") + mutedStyle.Render(" quit"))
+		instructions := mutedStyle.Render("↑/↓ move  ") + keyStyle.Render("space") + mutedStyle.Render(" toggle  ") + keyStyle.Render("a") + mutedStyle.Render(" all  ") + keyStyle.Render("n") + mutedStyle.Render(" none  ")
+		if m.device.coreReason == "" {
+			instructions += keyStyle.Render("enter") + mutedStyle.Render(" install  ")
+		}
+		b.WriteString(instructions + keyStyle.Render("q") + mutedStyle.Render(" quit"))
 		if m.checkingSudo || m.privilegeErr != nil {
 			b.WriteString("\n\n" + lipgloss.NewStyle().Foreground(lime).Render(m.status))
 		}
@@ -271,7 +445,7 @@ func (m model) View() string {
 func (m model) selectedIDs() []string {
 	ids := make([]string, 0, len(m.options))
 	for _, item := range m.options {
-		if item.selected {
+		if item.selected && item.compatible {
 			ids = append(ids, item.id)
 		}
 	}

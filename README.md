@@ -72,6 +72,12 @@ PHP and compiler updates are managed by your OS package manager. A scheduled Lin
 
 `--no-ui` installs the core setup without optional selections, for scripts or non-interactive sessions. The installer UI needs no Go when a matching release binary is available; building it from source requires Go 1.24 or later.
 
+### AI CLI theme defaults and compatibility
+
+Selecting Claude Code, Codex, or OpenCode installs and activates its Charm defaults automatically; there is no theme prompt. The shared colors come from `nvim/lua/themes/charm_dark.lua` and the Starship Charm palette. Claude Code and OpenCode support custom UI palettes. Codex currently exposes custom syntax/diff highlighting rather than full TUI chrome colors, so its Charm theme styles that supported surface. Cursor CLI has no custom palette setting in its current configuration schema; the generated shell config uses its supported `COLORFGBG` hint to select dark mode, but Cursor controls its own accent colors. Exact palette matching is therefore limited by each CLI's supported theming surface. Existing agent settings are merged and backed up before they are changed.
+
+The selector detects the OS, CPU architecture, Linux libc, package manager, and required system tools. Incompatible items are disabled with a reason; **a** selects only compatible items. The installer currently supports glibc-based Linux and macOS on x86_64/amd64 and ARM64/aarch64. System-package choices also require a supported package manager and `sudo` when the package is missing. musl/Alpine and Linux systems where glibc cannot be confirmed can still use `--config-only`, but cannot run this installer's core binary setup.
+
 ## What you get
 
 ### Neovim + NvChad
@@ -128,6 +134,7 @@ Nerd Font glyphs are recommended for the prompt and Neovim UI. Core executables 
 ├── install.sh             # Bootstrap, selection, installs, and weekly updates
 ├── update.sh              # Logged weekly updater entry point
 ├── tui/                   # Charm Bubble Tea/Bubbles multi-select and progress UI
+├── ai-themes/             # Charm defaults for Claude, Codex, and OpenCode
 ├── nvim/                  # NvChad configuration and Charm themes
 ├── shell/                 # Bash/Zsh and Fish aliases
 ├── starship.toml          # Charm left/right prompt

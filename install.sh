@@ -334,6 +334,7 @@ configure_bash() {
     printf 'export PATH="$HOME/.local/opt/go/bin:$HOME/.local/opt/node/bin:$HOME/.local/opt/bun/bin:$HOME/.bun/bin:$HOME/.cargo/bin:$HOME/.opencode/bin:$HOME/.local/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/local/sbin:$PATH"\n'
     printf 'export NPM_CONFIG_PREFIX="${NPM_CONFIG_PREFIX:-$HOME/.local}"\n'
     printf 'export BUN_INSTALL="$HOME/.local/opt/bun"\n'
+    printf 'export COLORFGBG="15;0"\n'
     printf '%s\n' 'if command -v brew >/dev/null 2>&1; then _terminal_llvm="$(brew --prefix llvm 2>/dev/null)/bin"; [[ ! -d "$_terminal_llvm" ]] || export PATH="$_terminal_llvm:$PATH"; unset _terminal_llvm; fi'
     printf 'if [[ -r %q ]]; then source %q; fi\n' "$REPO_DIR/shell/aliases.sh" "$REPO_DIR/shell/aliases.sh"
 
@@ -372,6 +373,7 @@ configure_zsh() {
     printf 'export PATH="$HOME/.local/opt/go/bin:$HOME/.local/opt/node/bin:$HOME/.local/opt/bun/bin:$HOME/.bun/bin:$HOME/.cargo/bin:$HOME/.opencode/bin:$HOME/.local/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/local/sbin:$PATH"\n'
     printf 'export NPM_CONFIG_PREFIX="${NPM_CONFIG_PREFIX:-$HOME/.local}"\n'
     printf 'export BUN_INSTALL="$HOME/.local/opt/bun"\n'
+    printf 'export COLORFGBG="15;0"\n'
     printf '%s\n' 'if command -v brew >/dev/null 2>&1; then _terminal_llvm="$(brew --prefix llvm 2>/dev/null)/bin"; [[ ! -d "$_terminal_llvm" ]] || export PATH="$_terminal_llvm:$PATH"; unset _terminal_llvm; fi'
     printf '[[ -r %q ]] && source %q\n' "$REPO_DIR/shell/aliases.sh" "$REPO_DIR/shell/aliases.sh"
     if ! grep -Eq 'starship[[:space:]]+init[[:space:]]+zsh' "$stripped"; then
@@ -404,6 +406,7 @@ configure_fish() {
     printf 'fish_add_path --prepend "$HOME/.local/opt/go/bin" "$HOME/.local/opt/node/bin" "$HOME/.local/opt/bun/bin" "$HOME/.bun/bin" "$HOME/.cargo/bin" "$HOME/.opencode/bin" "$HOME/.local/bin" /opt/homebrew/bin /opt/homebrew/sbin /usr/local/bin /usr/local/sbin\n'
     printf 'set -gx NPM_CONFIG_PREFIX "$HOME/.local"\n'
     printf 'set -gx BUN_INSTALL "$HOME/.local/opt/bun"\n'
+    printf 'set -gx COLORFGBG "15;0"\n'
     printf '%s\n' 'if type -q brew; set -l _terminal_llvm (brew --prefix llvm 2>/dev/null)/bin; test ! -d "$_terminal_llvm"; or fish_add_path --prepend "$_terminal_llvm"; end'
     printf 'if test -r %q\n  source %q\nend\n' "$REPO_DIR/shell/aliases.fish" "$REPO_DIR/shell/aliases.fish"
     if ! grep -Fq 'starship init fish' "$stripped"; then
@@ -549,6 +552,204 @@ install_uv() {
     || die "The uv installer failed."
 }
 
+install_theme_asset() {
+  local source="$1" target="$2"
+  mkdir -p "$(dirname "$target")"
+  if [[ -f "$target" ]] && cmp -s "$source" "$target"; then
+    return 0
+  fi
+  if [[ -e "$target" || -L "$target" ]]; then backup_path "$target"; fi
+  install -m 0644 "$source" "$target"
+}
+
+merge_json_setting() {
+  local target="$1" key="$2" value="$3" output
+  output="$(mktemp "$TMP_DIR/json-config.XXXXXX")"
+  python3 - "$target" "$output" "$key" "$value" <<'PY'
+import json
+import os
+import sys
+
+source, destination, key, value = sys.argv[1:]
+config = {}
+if os.path.exists(source):
+    with open(source, encoding="utf-8") as stream:
+        content = stream.read()
+
+    # OpenCode also accepts JSONC. Strip comments and trailing commas without
+    # mistaking comment markers or commas inside quoted strings for syntax.
+    uncommented = []
+    index = 0
+    in_string = False
+    escaped = False
+    while index < len(content):
+        char = content[index]
+        following = content[index + 1] if index + 1 < len(content) else ""
+        if in_string:
+            uncommented.append(char)
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            index += 1
+        elif char == '"':
+            in_string = True
+            uncommented.append(char)
+            index += 1
+        elif char == "/" and following == "/":
+            index += 2
+            while index < len(content) and content[index] not in "\r\n":
+                index += 1
+        elif char == "/" and following == "*":
+            index += 2
+            while index + 1 < len(content) and content[index:index + 2] != "*/":
+                if content[index] in "\r\n":
+                    uncommented.append(content[index])
+                index += 1
+            index = min(len(content), index + 2)
+        else:
+            uncommented.append(char)
+            index += 1
+
+    without_trailing_commas = []
+    index = 0
+    in_string = False
+    escaped = False
+    while index < len(uncommented):
+        char = uncommented[index]
+        if in_string:
+            without_trailing_commas.append(char)
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            index += 1
+        elif char == '"':
+            in_string = True
+            without_trailing_commas.append(char)
+            index += 1
+        elif char == ",":
+            lookahead = index + 1
+            while lookahead < len(uncommented) and uncommented[lookahead].isspace():
+                lookahead += 1
+            if lookahead < len(uncommented) and uncommented[lookahead] in "}]":
+                index += 1
+            else:
+                without_trailing_commas.append(char)
+                index += 1
+        else:
+            without_trailing_commas.append(char)
+            index += 1
+
+    config = json.loads("".join(without_trailing_commas))
+    if not isinstance(config, dict):
+        raise SystemExit(f"{source} must contain a JSON object")
+config[key] = value
+with open(destination, "w", encoding="utf-8") as stream:
+    json.dump(config, stream, indent=2, ensure_ascii=False)
+    stream.write("\n")
+PY
+  if [[ -f "$target" ]] && cmp -s "$target" "$output"; then return 0; fi
+  mkdir -p "$(dirname "$target")"
+  if [[ -e "$target" ]]; then
+    backup_copy "$target"
+    cat "$output" > "$target"
+  else
+    install -m 0644 "$output" "$target"
+  fi
+}
+
+merge_codex_theme_setting() {
+  local target="$1" output
+  output="$(mktemp "$TMP_DIR/codex-config.XXXXXX")"
+  python3 - "$target" "$output" <<'PY'
+import os
+import re
+import sys
+
+source, destination = sys.argv[1:]
+lines = []
+if os.path.exists(source):
+    with open(source, encoding="utf-8") as stream:
+        lines = stream.readlines()
+
+section_start = None
+section_end = len(lines)
+for index, line in enumerate(lines):
+    match = re.match(r"\s*\[([^]]+)\]\s*(?:#.*)?$", line)
+    if match:
+        if match.group(1).strip() == "tui":
+            section_start = index
+            section_end = len(lines)
+            for end in range(index + 1, len(lines)):
+                if re.match(r"\s*\[", lines[end]):
+                    section_end = end
+                    break
+            break
+
+setting = 'theme = "charm-dark"\n'
+if section_start is None:
+    if lines and not lines[-1].endswith("\n"):
+        lines[-1] += "\n"
+    if lines and lines[-1].strip():
+        lines.append("\n")
+    lines.extend(["[tui]\n", setting])
+else:
+    theme_line = None
+    for index in range(section_start + 1, section_end):
+        if re.match(r"\s*theme\s*=", lines[index]):
+            theme_line = index
+            break
+    if theme_line is not None:
+        indent = re.match(r"\s*", lines[theme_line]).group(0)
+        lines[theme_line] = indent + setting
+    else:
+        lines.insert(section_end, setting)
+
+with open(destination, "w", encoding="utf-8") as stream:
+    stream.writelines(lines)
+PY
+  if [[ -f "$target" ]] && cmp -s "$target" "$output"; then return 0; fi
+  mkdir -p "$(dirname "$target")"
+  if [[ -e "$target" ]]; then
+    backup_copy "$target"
+    cat "$output" > "$target"
+  else
+    install -m 0644 "$output" "$target"
+  fi
+}
+
+install_claude_theme() {
+  local config_dir="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+  install_theme_asset "$REPO_DIR/ai-themes/claude/charm-dark.json" "$config_dir/themes/charm-dark.json"
+  merge_json_setting "$config_dir/settings.json" theme "custom:charm-dark"
+  say "Enabled the Charm Dark theme for Claude Code."
+}
+
+install_codex_theme() {
+  local config_dir="${CODEX_HOME:-$HOME/.codex}"
+  install_theme_asset "$REPO_DIR/ai-themes/codex/charm-dark.tmTheme" "$config_dir/themes/charm-dark.tmTheme"
+  merge_codex_theme_setting "$config_dir/config.toml"
+  say "Enabled Charm Dark syntax highlighting for Codex."
+}
+
+install_opencode_theme() {
+  local config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/opencode" config_file
+  install_theme_asset "$REPO_DIR/ai-themes/opencode/charm.json" "$config_dir/themes/charm.json"
+  if [[ -f "$config_dir/tui.jsonc" ]]; then
+    merge_json_setting "$config_dir/tui.jsonc" theme charm
+  fi
+  if [[ -f "$config_dir/tui.json" || ! -f "$config_dir/tui.jsonc" ]]; then
+    config_file="$config_dir/tui.json"
+    merge_json_setting "$config_file" theme charm
+  fi
+  say "Enabled the Charm theme for OpenCode."
+}
+
 link_brew_gcc() {
   command -v brew >/dev/null 2>&1 || return 0
   local prefix gcc_path gxx_path
@@ -673,18 +874,22 @@ install_selected_tool() {
     codex)
       curl --fail --silent --show-error --location --retry 3 https://chatgpt.com/codex/install.sh --output "$TMP_DIR/codex-install.sh"
       CODEX_NON_INTERACTIVE=1 sh "$TMP_DIR/codex-install.sh"
+      install_codex_theme
       ;;
     opencode)
       curl --fail --silent --show-error --location --retry 3 https://opencode.ai/install --output "$TMP_DIR/opencode-install.sh"
       bash "$TMP_DIR/opencode-install.sh" --no-modify-path
+      install_opencode_theme
       ;;
     claude)
       curl --fail --silent --show-error --location --retry 3 https://claude.ai/install.sh --output "$TMP_DIR/claude-install.sh"
       bash "$TMP_DIR/claude-install.sh" stable
+      install_claude_theme
       ;;
     cursor)
       curl --fail --silent --show-error --location --retry 3 https://cursor.com/install --output "$TMP_DIR/cursor-install.sh"
       bash "$TMP_DIR/cursor-install.sh"
+      say "Cursor CLI will use the generated shell config's Charm dark-mode hint."
       ;;
     *) die "Unknown selected tool: $1" ;;
   esac
@@ -834,10 +1039,27 @@ EOF
   fi
 }
 
+linux_uses_glibc() {
+  [[ "$(uname -s)" == Linux ]] || return 1
+  [[ -r /etc/alpine-release ]] && return 1
+  if command -v getconf >/dev/null 2>&1 && getconf GNU_LIBC_VERSION 2>/dev/null | grep -q '^glibc '; then
+    return 0
+  fi
+  local loader
+  for loader in /lib/ld-linux*.so* /lib64/ld-linux*.so* /usr/lib/ld-linux*.so*; do
+    [[ -e "$loader" ]] && return 0
+  done
+  return 1
+}
+
 install_tools() {
   local os arch nvim_asset starship_pattern lsd_pattern bat_pattern glow_pattern pop_pattern
   os="$(uname -s)"
   arch="$(uname -m)"
+
+  if [[ "$os" == Linux ]] && ! linux_uses_glibc; then
+    die "The core binary releases require glibc. This Linux device is not confirmed as glibc-compatible; use --config-only to link configs without installing tools."
+  fi
 
   case "$os:$arch" in
     Linux:x86_64|Linux:amd64)

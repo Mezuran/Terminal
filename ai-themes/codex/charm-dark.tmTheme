@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>name</key>
+	<string>Charm Dark</string>
+	<key>settings</key>
+	<array>
+		<dict>
+			<key>settings</key>
+			<dict>
+				<key>background</key><string>#201f26</string>
+				<key>foreground</key><string>#e6dfed</string>
+				<key>caret</key><string>#00ffb2</string>
+				<key>selection</key><string>#3a3546</string>
+				<key>lineHighlight</key><string>#292630</string>
+			</dict>
+		</dict>
+		<dict><key>scope</key><string>comment, punctuation.definition.comment</string><key>settings</key><dict><key>foreground</key><string>#857d8e</string></dict></dict>
+		<dict><key>scope</key><string>keyword, storage, storage.type</string><key>settings</key><dict><key>foreground</key><string>#c89cff</string></dict></dict>
+		<dict><key>scope</key><string>entity.name.function, support.function</string><key>settings</key><dict><key>foreground</key><string>#9671ff</string></dict></dict>
+		<dict><key>scope</key><string>variable, variable.parameter</string><key>settings</key><dict><key>foreground</key><string>#fffdf5</string></dict></dict>
+		<dict><key>scope</key><string>string, punctuation.definition.string</string><key>settings</key><dict><key>foreground</key><string>#00ffb2</string></dict></dict>
+		<dict><key>scope</key><string>constant.numeric, constant.language</string><key>settings</key><dict><key>foreground</key><string>#ff9d76</string></dict></dict>
+		<dict><key>scope</key><string>entity.name.type, support.type</string><key>settings</key><dict><key>foreground</key><string>#0adcd9</string></dict></dict>
+		<dict><key>scope</key><string>constant, constant.character.escape</string><key>settings</key><dict><key>foreground</key><string>#ecfd65</string></dict></dict>
+		<dict><key>scope</key><string>invalid</string><key>settings</key><dict><key>foreground</key><string>#ff6daa</string></dict></dict>
+	</array>
+	<key>uuid</key>
+	<string>20b2806f-06d3-4ef8-a9f6-947790c6af95</string>
+</dict>
+</plist>
