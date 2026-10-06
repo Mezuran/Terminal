@@ -1,0 +1,10 @@
+Terminal
+Copyright 2026 Mezuran
+
+This project is licensed under the Apache License, Version 2.0. You may obtain
+a copy of the License in the LICENSE file or at:
+
+    https://www.apache.org/licenses/LICENSE-2.0
+
+The project configures separate upstream software. See THIRD_PARTY_NOTICES.md;
+those projects are not relicensed by this notice.
