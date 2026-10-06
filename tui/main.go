@@ -1,0 +1,395 @@
+package main
+
+import (
+	"bufio"
+	"context"
+	"fmt"
+	"io"
+	"os"
+	"os/exec"
+	"regexp"
+	"runtime"
+	"strconv"
+	"strings"
+	"syscall"
+
+	"github.com/charmbracelet/bubbles/progress"
+	"github.com/charmbracelet/bubbles/spinner"
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+)
+
+var (
+	cream  = lipgloss.Color("#fffdf5")
+	muted  = lipgloss.Color("#a49bab")
+	violet = lipgloss.Color("#9671ff")
+	mint   = lipgloss.Color("#00ffb2")
+	pink   = lipgloss.Color("#ff6daa")
+	lime   = lipgloss.Color("#ecfd65")
+
+	titleStyle = lipgloss.NewStyle().Bold(true).Foreground(cream).Background(violet).Padding(0, 2)
+	mutedStyle = lipgloss.NewStyle().Foreground(muted)
+	keyStyle   = lipgloss.NewStyle().Bold(true).Foreground(mint)
+	checked    = lipgloss.NewStyle().Bold(true).Foreground(mint)
+	unchecked  = lipgloss.NewStyle().Foreground(muted)
+	nameStyle  = lipgloss.NewStyle().Bold(true).Foreground(cream)
+	statusGood = lipgloss.NewStyle().Bold(true).Foreground(mint)
+	statusBad  = lipgloss.NewStyle().Bold(true).Foreground(pink)
+	ansiCSI    = regexp.MustCompile("\\x1b\\[[0-?]*[ -/]*[@-~]")
+)
+
+type option struct {
+	id          string
+	name        string
+	description string
+	selected    bool
+}
+
+func defaultOptions() []option {
+	return []option{
+		{id: "rust", name: "Rust", description: "Stable toolchain via rustup"},
+		{id: "go", name: "Go", description: "Latest stable Go release"},
+		{id: "bun", name: "Bun", description: "Latest stable JavaScript runtime"},
+		{id: "nodejs", name: "Node.js LTS", description: "Latest production LTS release"},
+		{id: "uv", name: "uv", description: "Fast Python package/project manager"},
+		{id: "python", name: "Python", description: "Latest stable Python via uv"},
+		{id: "composer", name: "Composer", description: "PHP dependency manager (adds PHP if needed)"},
+		{id: "php", name: "PHP", description: "Latest stable version available for this OS"},
+		{id: "clang", name: "Clang", description: "LLVM compiler from your OS package channel"},
+		{id: "gcc", name: "GCC", description: "GNU compiler from your OS package channel"},
+		{id: "codex", name: "OpenAI Codex", description: "Standalone Codex CLI from OpenAI"},
+		{id: "opencode", name: "OpenCode", description: "OpenCode terminal coding agent"},
+		{id: "claude", name: "Claude Code", description: "Claude Code CLI, stable channel"},
+		{id: "cursor", name: "Cursor CLI", description: "Cursor Agent CLI; command is `agent`"},
+	}
+}
+
+type model struct {
+	options       []option
+	cursor        int
+	width         int
+	stage         string
+	status        string
+	logs          []string
+	progress      progress.Model
+	spinner       spinner.Model
+	selected      []string
+	processDone   bool
+	processErr    error
+	privilegeErr  error
+	checkingSudo  bool
+	commandCancel context.CancelFunc
+}
+
+type logMessage string
+type processDoneMessage struct{ err error }
+type sudoResultMessage struct{ err error }
+type childStartedMessage struct{ cancel context.CancelFunc }
+
+var activeProgram *tea.Program
+
+func initialModel() model {
+	s := spinner.New()
+	s.Spinner = spinner.Dot
+	s.Style = lipgloss.NewStyle().Foreground(violet)
+	p := progress.New(progress.WithGradient("#00ffb2", "#9671ff"))
+	return model{
+		options:  defaultOptions(),
+		stage:    "select",
+		status:   "Choose optional tools. Core terminal setup is always included.",
+		progress: p,
+		spinner:  s,
+	}
+}
+
+func (m model) Init() tea.Cmd { return nil }
+
+func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		m.width = msg.Width
+		m.progress.Width = max(20, min(54, msg.Width-10))
+	case spinner.TickMsg:
+		var cmd tea.Cmd
+		m.spinner, cmd = m.spinner.Update(msg)
+		return m, cmd
+	case progress.FrameMsg:
+		updated, cmd := m.progress.Update(msg)
+		m.progress = updated.(progress.Model)
+		return m, cmd
+	case logMessage:
+		line := strings.TrimSpace(string(msg))
+		if strings.HasPrefix(line, "@@TERMINAL_PROGRESS\t") {
+			fields := strings.SplitN(line, "\t", 4)
+			if len(fields) == 4 {
+				current, _ := strconv.Atoi(fields[1])
+				total, _ := strconv.Atoi(fields[2])
+				if total > 0 {
+					m.status = fields[3]
+					percent := float64(current) / float64(total)
+					cmd := m.progress.SetPercent(percent)
+					return m, cmd
+				}
+			}
+			return m, nil
+		}
+		if line != "" {
+			m.logs = append(m.logs, trimLine(line, max(48, min(110, m.width-8))))
+			if len(m.logs) > 6 {
+				m.logs = m.logs[len(m.logs)-6:]
+			}
+		}
+		return m, nil
+	case processDoneMessage:
+		m.processDone = true
+		m.processErr = msg.err
+		m.stage = "done"
+		if msg.err != nil {
+			m.status = "Setup finished with an error. Review the output below."
+		} else {
+			m.status = "Your Charm terminal setup is ready."
+		}
+		return m, nil
+	case sudoResultMessage:
+		m.checkingSudo = false
+		if msg.err != nil {
+			m.privilegeErr = msg.err
+			m.status = "Administrator approval was not granted; choose Run again or quit."
+			return m, nil
+		}
+		m.privilegeErr = nil
+		m.stage = "running"
+		m.status = "Preparing your selected stable tools…"
+		return m, tea.Batch(m.spinner.Tick, m.runInstaller())
+	case childStartedMessage:
+		m.commandCancel = msg.cancel
+		return m, nil
+	case tea.KeyMsg:
+		if m.stage == "select" {
+			switch msg.String() {
+			case "ctrl+c", "q":
+				return m, tea.Quit
+			case "up", "k":
+				if m.cursor > 0 {
+					m.cursor--
+				}
+			case "down", "j":
+				if m.cursor < len(m.options)-1 {
+					m.cursor++
+				}
+			case " ":
+				m.options[m.cursor].selected = !m.options[m.cursor].selected
+			case "a":
+				for i := range m.options {
+					m.options[i].selected = true
+				}
+			case "n":
+				for i := range m.options {
+					m.options[i].selected = false
+				}
+			case "enter":
+				m.selected = m.selectedIDs()
+				if m.needsSudo() {
+					m.checkingSudo = true
+					m.status = "Selected system packages need administrator approval."
+					cmd := exec.Command("sudo", "-v")
+					return m, tea.ExecProcess(cmd, func(err error) tea.Msg { return sudoResultMessage{err: err} })
+				}
+				m.stage = "running"
+				m.status = "Preparing your selected stable tools…"
+				return m, tea.Batch(m.spinner.Tick, m.runInstaller())
+			}
+		} else if m.stage == "done" {
+			switch msg.String() {
+			case "q", "enter", "esc", "ctrl+c":
+				return m, tea.Quit
+			}
+		} else if msg.String() == "ctrl+c" && m.commandCancel != nil {
+			m.commandCancel()
+			m.status = "Stopping installer…"
+		}
+	}
+	return m, nil
+}
+
+func (m model) View() string {
+	if m.width == 0 {
+		return "\n  Starting Terminal…"
+	}
+	var b strings.Builder
+	b.WriteString("\n")
+	b.WriteString(titleStyle.Render(" ✦  TERMINAL  "))
+	b.WriteString("\n\n")
+	if m.stage == "select" {
+		b.WriteString(lipgloss.NewStyle().Bold(true).Foreground(cream).Render("Choose your toolkit"))
+		b.WriteString("\n")
+		b.WriteString(mutedStyle.Render("Core setup is included; optional tools start unchecked."))
+		b.WriteString("\n\n")
+		for i, item := range m.options {
+			pointer := "  "
+			if i == m.cursor {
+				pointer = lipgloss.NewStyle().Foreground(violet).Bold(true).Render("› ")
+			}
+			box := unchecked.Render("○")
+			if item.selected {
+				box = checked.Render("●")
+			}
+			name := nameStyle.Render(item.name)
+			desc := mutedStyle.Render(item.description)
+			b.WriteString(fmt.Sprintf("%s%s  %-18s %s\n", pointer, box, name, desc))
+		}
+		b.WriteString("\n")
+		b.WriteString(mutedStyle.Render("↑/↓ move  ") + keyStyle.Render("space") + mutedStyle.Render(" toggle  ") + keyStyle.Render("a") + mutedStyle.Render(" all  ") + keyStyle.Render("n") + mutedStyle.Render(" none  ") + keyStyle.Render("enter") + mutedStyle.Render(" install  ") + keyStyle.Render("q") + mutedStyle.Render(" quit"))
+		if m.checkingSudo || m.privilegeErr != nil {
+			b.WriteString("\n\n" + lipgloss.NewStyle().Foreground(lime).Render(m.status))
+		}
+		return b.String()
+	}
+
+	if m.stage == "running" {
+		b.WriteString(m.spinner.View() + " " + lipgloss.NewStyle().Bold(true).Foreground(cream).Render(m.status) + "\n\n")
+		b.WriteString(m.progress.View() + "\n\n")
+		for _, line := range m.logs {
+			b.WriteString(mutedStyle.Render("  "+line) + "\n")
+		}
+		b.WriteString("\n" + mutedStyle.Render("ctrl+c to cancel"))
+		return b.String()
+	}
+
+	if m.processErr == nil {
+		b.WriteString(statusGood.Render("✓  ") + lipgloss.NewStyle().Bold(true).Foreground(cream).Render(m.status) + "\n\n")
+	} else {
+		b.WriteString(statusBad.Render("✗  ") + lipgloss.NewStyle().Bold(true).Foreground(cream).Render(m.status) + "\n\n")
+	}
+	for _, line := range m.logs {
+		b.WriteString(mutedStyle.Render("  "+line) + "\n")
+	}
+	b.WriteString("\n" + mutedStyle.Render("enter or q to close"))
+	return b.String()
+}
+
+func (m model) selectedIDs() []string {
+	ids := make([]string, 0, len(m.options))
+	for _, item := range m.options {
+		if item.selected {
+			ids = append(ids, item.id)
+		}
+	}
+	return ids
+}
+
+func (m model) needsSudo() bool {
+	if runtime.GOOS != "linux" || os.Getenv("TERMINAL_SKIP_SUDO_PREFLIGHT") == "1" {
+		return false
+	}
+	_, aptErr := exec.LookPath("apt-get")
+	_, dnfErr := exec.LookPath("dnf")
+	_, pacmanErr := exec.LookPath("pacman")
+	if aptErr != nil && dnfErr != nil && pacmanErr != nil {
+		return false
+	}
+	for _, id := range m.selected {
+		switch id {
+		case "php", "clang", "gcc":
+			if _, err := exec.LookPath(id); err != nil {
+				return true
+			}
+		case "composer":
+			if _, err := exec.LookPath("php"); err != nil {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (m model) runInstaller() tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithCancel(context.Background())
+		cmd := exec.CommandContext(ctx, "bash", os.Args[1], "--run-selected", strings.Join(m.selected, ","))
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		reader, writer, err := os.Pipe()
+		if err != nil {
+			cancel()
+			return processDoneMessage{err: err}
+		}
+		cmd.Stdout = writer
+		cmd.Stderr = writer
+		if err := cmd.Start(); err != nil {
+			_ = reader.Close()
+			_ = writer.Close()
+			cancel()
+			return processDoneMessage{err: err}
+		}
+		_ = writer.Close()
+		stop := func() {
+			if cmd.Process != nil {
+				_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
+			}
+			cancel()
+		}
+		go func() {
+			defer reader.Close()
+			scanner := bufio.NewScanner(reader)
+			scanner.Buffer(make([]byte, 2048), 1024*1024)
+			for scanner.Scan() {
+				if activeProgram != nil {
+					activeProgram.Send(logMessage(scanner.Text()))
+				}
+			}
+		}()
+		if activeProgram != nil {
+			activeProgram.Send(childStartedMessage{cancel: stop})
+		}
+		err = cmd.Wait()
+		cancel()
+		return processDoneMessage{err: err}
+	}
+}
+
+func (m model) execute() error {
+	p := tea.NewProgram(m, tea.WithAltScreen())
+	activeProgram = p
+	final, err := p.Run()
+	if err != nil {
+		return err
+	}
+	if result, ok := final.(model); ok {
+		return result.processErr
+	}
+	return nil
+}
+
+func trimLine(line string, limit int) string {
+	line = ansiCSI.ReplaceAllString(line, "")
+	line = strings.ReplaceAll(line, "\r", " ")
+	line = strings.TrimSpace(line)
+	runes := []rune(line)
+	if len(runes) <= limit {
+		return line
+	}
+	return string(runes[:max(0, limit-1)]) + "…"
+}
+
+func main() {
+	if len(os.Args) < 2 || strings.TrimSpace(os.Args[1]) == "" {
+		fmt.Fprintln(os.Stderr, "usage: terminal-tui /path/to/install.sh")
+		os.Exit(2)
+	}
+	if _, err := os.Stat(os.Args[1]); err != nil {
+		fmt.Fprintln(os.Stderr, "installer script not found:", err)
+		os.Exit(2)
+	}
+	tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "interactive terminal required; use install.sh --no-ui for non-interactive setup")
+		os.Exit(2)
+	}
+	_ = tty.Close()
+	if err := initialModel().execute(); err != nil {
+		if err != io.EOF {
+			fmt.Fprintln(os.Stderr, "terminal setup failed:", err)
+		}
+		os.Exit(1)
+	}
+}

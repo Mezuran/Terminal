@@ -22,9 +22,11 @@ On Linux or macOS, with `git`, `curl`, `tar`, and Python 3 available, run:
 git clone --depth 1 https://github.com/Mezuran/Terminal.git "$HOME/.local/share/terminal" && "$HOME/.local/share/terminal/install.sh"
 ```
 
-The installer works in your home directory and does **not** use `sudo`. It downloads missing tools from their upstream releases, sets up the configurations, then installs the Neovim plugins pinned by the lockfile. Open a new terminal when it finishes.
+The Charm installer opens a keyboard-driven multi-select menu with a live progress bar and status log. The core terminal setup is always included; optional tools start unchecked. Use **↑/↓** to move, **space** to select multiple tools, **a** to select all, **n** to clear, and **enter** to install. The UI uses Charmbracelet’s Bubble Tea and Bubbles packages; prebuilt, checksum-verified UI binaries are used when available.
 
-> **Backups, not surprises:** Existing `~/.config/nvim` and `~/.config/starship.toml` are moved to timestamped `.backup-*` paths before the managed symlinks are created. Existing shell startup files are preserved and backed up before a small, marked setup block is appended. Re-running the installer is safe.
+The setup is user-local by default. If you select PHP, Clang, or GCC and a system package is needed, the installer explains why and asks for interactive `sudo` approval first. It never stores a password or runs `sudo` silently. After installation, open a new terminal.
+
+> **Backups, not surprises:** Existing `~/.config/nvim` and `~/.config/starship.toml` are moved to timestamped `.backup-*` paths before the managed symlinks are created. Existing shell startup files are preserved and backed up before a small, marked setup block is added or refreshed. Re-running the installer is safe.
 
 To update the setup later:
 
@@ -32,13 +34,43 @@ To update the setup later:
 git -C "$HOME/.local/share/terminal" pull --ff-only && "$HOME/.local/share/terminal/install.sh"
 ```
 
-This refreshes the managed configs and bootstraps any missing Neovim plugins from the lockfile. Installed tool binaries and existing plugin revisions are left in place; the installer downloads a binary only when the command is missing. Use `:Lazy update` from Neovim when you intentionally want newer plugin versions.
+This refreshes the managed configs and bootstraps any missing Neovim plugins from the lockfile. Installed core binaries and existing plugin revisions are left in place; use `:Lazy update` from Neovim when you intentionally want newer plugin versions. To change the optional-tool selection, run the installer again and make new choices.
 
 To only link the configs and aliases (without downloading tools or installing plugins):
 
 ```bash
 "$HOME/.local/share/terminal/install.sh" --config-only
 ```
+
+## Optional tools and updates
+
+The selector offers these optional tools. Their installation/update channels are chosen to track production/stable versions:
+
+| Menu option | Install and weekly update behavior |
+| --- | --- |
+| Rust | `rustup` stable toolchain |
+| Go | Latest stable release from `go.dev` |
+| Bun | Official installer; `bun upgrade --stable` |
+| Node.js | Latest LTS release (production channel) |
+| uv | Official installer and `uv self update` |
+| Python | Latest stable Python managed by uv |
+| Composer | Official installer and `composer self-update --stable`; PHP is installed if needed |
+| PHP | Latest stable version offered by the OS package manager or Homebrew |
+| Clang / GCC | OS package channel or Homebrew; weekly package upgrades |
+| OpenAI Codex | Official Codex CLI installer |
+| OpenCode | Official OpenCode installer |
+| Claude Code | Official **stable** channel |
+| Cursor CLI | Official Cursor CLI (`agent` command); the CLI updates itself automatically |
+
+Selected tools are recorded in `~/.config/terminal/selected-tools`. A user-level **weekly** systemd timer (Linux) or launchd agent (macOS) checks only those tools. Logs are written to `~/.local/state/terminal/updates.log`. Run an update immediately with:
+
+```bash
+"$HOME/.local/share/terminal/update.sh"
+```
+
+PHP and compiler updates are managed by your OS package manager. A scheduled Linux update cannot prompt for a password: it uses `sudo -n` only, and logs/defer system-package upgrades if administrator authorization is not already available. User-local tool updates continue normally. Run the command above from a terminal after `sudo -v` to apply those updates interactively. No sudo credentials are saved.
+
+`--no-ui` installs the core setup without optional selections, for scripts or non-interactive sessions. The installer UI needs no Go when a matching release binary is available; building it from source requires Go 1.24 or later.
 
 ## What you get
 
@@ -87,13 +119,15 @@ cat  # bat
 - Linux: x86_64 and ARM64
 - macOS: Intel and Apple Silicon
 
-Nerd Font glyphs are recommended for the prompt and Neovim UI. The installer places missing executables in `~/.local/bin` and Neovim in `~/.local/opt`; no system packages are changed.
+Nerd Font glyphs are recommended for the prompt and Neovim UI. Core executables and runtimes are installed under your home directory. Selecting PHP/Clang/GCC can use the system package manager and therefore requires your explicit approval. Linux supports apt and dnf for these packages; macOS uses Homebrew. On Arch-based systems, initial package installation is supported, but unattended weekly system-package upgrades are intentionally not run.
 
 ## Layout
 
 ```text
 .
-├── install.sh             # User-local bootstrap and config installer
+├── install.sh             # Bootstrap, selection, installs, and weekly updates
+├── update.sh              # Logged weekly updater entry point
+├── tui/                   # Charm Bubble Tea/Bubbles multi-select and progress UI
 ├── nvim/                  # NvChad configuration and Charm themes
 ├── shell/                 # Bash/Zsh and Fish aliases
 ├── starship.toml          # Charm left/right prompt

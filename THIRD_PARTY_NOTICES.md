@@ -12,5 +12,6 @@ This repository configures (it does not vendor) the projects below. Each remains
 - [Glow](https://github.com/charmbracelet/glow)
 - [Pop](https://github.com/charmbracelet/pop)
 - [ble.sh](https://github.com/akinomyoga/ble.sh), optional Bash right-prompt support
+- [Bubble Tea](https://github.com/charmbracelet/bubbletea), [Bubbles](https://github.com/charmbracelet/bubbles), and [Lip Gloss](https://github.com/charmbracelet/lipgloss), used by the installer UI. Release binaries include compiled Go module dependencies; source builds resolve them from their upstream modules.
 
 The installer links these configurations and installs upstream release binaries; it does not copy those projects' source code into this repository.
